@@ -1,8 +1,5 @@
 package ua.cdu.edu.fotius.fspm.valorant.analytics;
 
-import ua.cdu.edu.fotius.fspm.valorant.analytics.infrastructure.client.RankCalculatorClient;
-import ua.cdu.edu.fotius.fspm.valorant.analytics.infrastructure.client.RosterServiceClient;
-import ua.cdu.edu.fotius.fspm.valorant.analytics.infrastructure.rest.MatchController;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.HttpStatus;
 import io.micronaut.http.client.HttpClient;
@@ -14,9 +11,23 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.application.MatchApplicationService;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.exception.DomainException;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.Match;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.MatchHistoryEntry;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.MatchId;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.MatchResult;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.PlayerId;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.PlayerStats;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.RatingChange;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.domain.model.RosterId;
+import ua.cdu.edu.fotius.fspm.valorant.analytics.infrastructure.rest.MatchController;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 
 @MicronautTest
@@ -25,169 +36,109 @@ class MatchControllerTest {
     @Inject
     @Client("/")
     HttpClient client;
-    @Inject
-    RankCalculatorClient rankCalculatorClient;
-    @Inject
-    RosterServiceClient rosterServiceClient;
 
-    @MockBean(RankCalculatorClient.class)
-    RankCalculatorClient mockRankCalculatorClient() {
-        return Mockito.mock(RankCalculatorClient.class);
-    }
+    @Inject
+    MatchApplicationService matchApplicationService;
 
-    @MockBean(RosterServiceClient.class)
-    RosterServiceClient mockRosterServiceClient() {
-        return Mockito.mock(RosterServiceClient.class);
+    @MockBean(MatchApplicationService.class)
+    MatchApplicationService mockMatchApplicationService() {
+        return Mockito.mock(MatchApplicationService.class);
     }
 
     @Test
-    @DisplayName("GIVEN match submission WHEN posted THEN calls RankCalculator and persists to DB")
-    void testMatchSubmissionWithMockedInterService() {
-        Mockito.when(rankCalculatorClient.calculateRating(any()))
-                .thenReturn(new RankCalculatorClient.RankCalculationResponse(25, "PROMOTED"));
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "LOCKED", null, null));
+    @DisplayName("GIVEN valid match submission WHEN posted THEN returns 200 OK with MatchSubmissionResponse")
+    void testSubmitMatchReturns200() {
+        var recorded = new Match(
+            new MatchId("m-101"),
+            new RosterId("r-101"),
+            new PlayerId("p-001"),
+            "Ascent",
+            MatchResult.WIN,
+            new PlayerStats(5, 22, 12, 5, 310, false),
+            new RatingChange(25, "PROMOTED")
+        );
+        Mockito.when(matchApplicationService.submitMatch(any(), any(), anyString(), anyBoolean(), any(), anyString()))
+            .thenReturn(recorded);
 
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
+        var payload = new MatchController.MatchSubmissionRequest(
+            "r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310, false
+        );
+        var req = HttpRequest.POST("/api/v1/matches/submit", payload)
             .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
         var res = client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class);
 
         assertEquals(HttpStatus.OK, res.getStatus());
         assertNotNull(res.body());
+        assertEquals("m-101", res.body().matchId());
         assertEquals(25, res.body().deltaRR());
         assertEquals("PROMOTED", res.body().tierStatus());
     }
 
     @Test
-    @DisplayName("GIVEN DRAFT roster WHEN match submitted THEN 400 Bad Request")
-    void testMatchSubmissionDraftRosterReturns400() {
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "DRAFT", null, null));
+    @DisplayName("GIVEN ROSTER_NOT_LOCKED domain error WHEN match submitted THEN 400 Bad Request")
+    void testSubmitMatchNotLockedReturns400() {
+        Mockito.when(matchApplicationService.submitMatch(any(), any(), anyString(), anyBoolean(), any(), anyString()))
+            .thenThrow(new DomainException("ROSTER_NOT_LOCKED", "Roster must be LOCKED before match submission"));
 
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
+        var payload = new MatchController.MatchSubmissionRequest(
+            "r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310, false
+        );
+        var req = HttpRequest.POST("/api/v1/matches/submit", payload)
             .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
         var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
+            () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
     }
 
     @Test
-    @DisplayName("GIVEN ARCHIVED roster WHEN match submitted THEN 409 Conflict (already submitted)")
-    void testMatchSubmissionArchivedRosterReturns409() {
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "ARCHIVED", null, null));
+    @DisplayName("GIVEN MATCH_ALREADY_SUBMITTED domain error WHEN match submitted THEN 409 Conflict")
+    void testSubmitMatchAlreadySubmittedReturns409() {
+        Mockito.when(matchApplicationService.submitMatch(any(), any(), anyString(), anyBoolean(), any(), anyString()))
+            .thenThrow(new DomainException("MATCH_ALREADY_SUBMITTED", "Match already submitted for roster r-101"));
 
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
+        var payload = new MatchController.MatchSubmissionRequest(
+            "r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310, false
+        );
+        var req = HttpRequest.POST("/api/v1/matches/submit", payload)
             .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
         var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
+            () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
         assertEquals(HttpStatus.CONFLICT, ex.getStatus());
     }
 
     @Test
-    @DisplayName("GIVEN archive returns 409 (race condition) WHEN match submitted THEN 409 Conflict")
-    void testMatchSubmissionArchiveRaceConditionReturns409() {
-        Mockito.when(rankCalculatorClient.calculateRating(any()))
-                .thenReturn(new RankCalculatorClient.RankCalculationResponse(25, "PROMOTED"));
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "LOCKED", null, null));
-        Mockito.doThrow(new HttpClientResponseException("Already archived",
-                io.micronaut.http.HttpResponse.status(HttpStatus.CONFLICT)))
-                .when(rosterServiceClient).archiveRoster(anyString(), anyString());
-
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
-            .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
+    @DisplayName("GIVEN missing Authorization header WHEN match submitted THEN 401 Unauthorized")
+    void testSubmitMatchWithoutTokenReturns401() {
+        var payload = new MatchController.MatchSubmissionRequest(
+            "r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310, false
+        );
+        var req = HttpRequest.POST("/api/v1/matches/submit", payload);
         var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
-        assertEquals(HttpStatus.CONFLICT, ex.getStatus());
-    }
-
-    @Test
-    @DisplayName("GIVEN archive fails (non-409) WHEN match submitted THEN 400 Bad Request")
-    void testMatchSubmissionArchiveFailureReturns400() {
-        Mockito.when(rankCalculatorClient.calculateRating(any()))
-                .thenReturn(new RankCalculatorClient.RankCalculationResponse(25, "PROMOTED"));
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "LOCKED", null, null));
-        Mockito.doThrow(new HttpClientResponseException("Server error",
-                io.micronaut.http.HttpResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)))
-                .when(rosterServiceClient).archiveRoster(anyString(), anyString());
-
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
-            .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
-        var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
-        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-    }
-
-    @Test
-    @DisplayName("GIVEN roster service throws exception WHEN match submitted THEN 400 Bad Request (fail-fast)")
-    void testMatchSubmissionRosterServiceThrowsReturns400() {
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenThrow(new RuntimeException("Roster service unavailable"));
-
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
-            .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
-        var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
-        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-    }
-
-    @Test
-    @DisplayName("GIVEN match submission WHEN posted THEN persists to DB and returns response")
-    void testMatchSubmissionPersistsToDb() {
-        Mockito.when(rankCalculatorClient.calculateRating(any()))
-                .thenReturn(new RankCalculatorClient.RankCalculationResponse(20, "MAINTAINED"));
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "LOCKED", null, null));
-
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload)
-            .header("Authorization", "Bearer jwt-token-for-ProGamer#EUW");
-        var res = client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class);
-
-        assertEquals(HttpStatus.OK, res.getStatus());
-        assertNotNull(res.body());
-        assertEquals(20, res.body().deltaRR());
-        assertEquals("MAINTAINED", res.body().tierStatus());
-    }
-
-    @Test
-    @DisplayName("GIVEN no auth token WHEN match submitted THEN 401 Unauthorized")
-    void testMatchSubmissionWithoutTokenReturns401() {
-        Mockito.when(rankCalculatorClient.calculateRating(any()))
-                .thenReturn(new RankCalculatorClient.RankCalculationResponse(15, "MAINTAINED"));
-        Mockito.when(rosterServiceClient.getRoster(anyString(), anyString()))
-                .thenReturn(new RosterServiceClient.RosterResponse("r-101", "p-001", "Ascent", "LOCKED", null, null));
-
-        var reqPayload = new MatchController.MatchSubmissionRequest("r-101", "p-001", "Ascent", true, 5, 22, 12, 5, 310,
-                false);
-        var req = HttpRequest.POST("/api/v1/matches/submit", reqPayload);
-        var ex = assertThrows(HttpClientResponseException.class,
-                () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
+            () -> client.toBlocking().exchange(req, MatchController.MatchSubmissionResponse.class));
         assertEquals(HttpStatus.UNAUTHORIZED, ex.getStatus());
     }
 
     @Test
-    @DisplayName("GIVEN match history WHEN requested THEN returns list of past matches")
-    void testMatchHistoryReturnsList() {
+    @DisplayName("GIVEN player history WHEN requested THEN returns 200 OK with mapped DTOs")
+    void testGetMatchHistoryReturns200() {
+        Mockito.when(matchApplicationService.getMatchHistory(new PlayerId("p-001")))
+            .thenReturn(List.of(new MatchHistoryEntry(
+                new MatchId("m-101"),
+                "Ascent",
+                MatchResult.WIN,
+                new RatingChange(25, "PROMOTED")
+            )));
+
         var req = HttpRequest.GET("/api/v1/matches/history/p-001");
         var res = client.toBlocking().exchange(req, MatchController.MatchHistoryItemDto[].class);
 
         assertEquals(HttpStatus.OK, res.getStatus());
         assertNotNull(res.body());
+        assertEquals(1, res.body().length);
+        assertEquals("m-101", res.body()[0].matchId());
+        assertEquals("Ascent", res.body()[0].mapName());
+        assertEquals("WIN", res.body()[0].result());
+        assertEquals(25, res.body()[0].deltaRR());
+        assertEquals("PROMOTED", res.body()[0].tierStatus());
     }
 }
